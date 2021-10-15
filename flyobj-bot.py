@@ -88,7 +88,7 @@ def elencoaerei(msg, latitudine, longitudine, language):
     chat_id = msg["chat"]["id"]
     dictforfile = dict()
     filedaleggere = open(str(chat_id), 'wb')
-    url = "https://public-api.adsbexchange.com/VirtualRadar/AircraftList.json?lat=" + \
+    url = "https://radar.freedar.uk/VirtualRadar/AircraftList.json?lat=" + \
           str(latitudine) + "&lng=" + str(longitudine) + "&fDstL=0&fDstU=100"
     
     with requests.get(url) as url:
