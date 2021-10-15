@@ -14,6 +14,10 @@ logging.basicConfig(filename='/progetti/flyobj_bot/myapp.log', format='%(asctime
 logging.info('Started')
 
 
+TELEGRAM_TOKEN = '*******************************'
+MAPS_KEY = '**********************************'
+
+
 def traduci(sentence, langout):
     tr = Translator()
     s = ' ' + tr.translate(sentence, dest=langout).text + ' '
@@ -34,7 +38,7 @@ def on_chat_message(msg):
 
         txt = msg['text']
         if txt[2] + txt[-1:] == '><':
-            infovolo(msg, language)
+            info_volo(msg, language)
         elif txt == '/start':
             bot.sendMessage(
                 chat_id,
@@ -75,7 +79,7 @@ def on_chat_message(msg):
             latitudine = msg["location"]["latitude"]
             longitudine = msg["location"]["longitude"]
             logging.info(str(latitudine) + "," + str(longitudine))
-            elencoaerei(msg, latitudine, longitudine, language)
+            elenco_aerei(msg, latitudine, longitudine, language)
         except KeyError as e:
             logging.info('I got a KeyError - reason "%s"' % str(e))
             bot.sendMessage(chat_id, traduci("C'è qualche problema con le tue coordinate", language))
@@ -83,11 +87,11 @@ def on_chat_message(msg):
         bot.sendMessage(chat_id, traduci('The answer is 42', language))
 
 
-def elencoaerei(msg, latitudine, longitudine, language):
+def elenco_aerei(msg, latitudine, longitudine, language):
     name = msg["from"]["first_name"]
     chat_id = msg["chat"]["id"]
-    dictforfile = dict()
-    filedaleggere = open(str(chat_id), 'wb')
+    dict_from_file = dict()
+    file_da_leggere = open(str(chat_id), 'wb')
     url = "https://radar.freedar.uk/VirtualRadar/AircraftList.json?lat=" + \
           str(latitudine) + "&lng=" + str(longitudine) + "&fDstL=0&fDstU=100"
     
@@ -111,9 +115,8 @@ def elencoaerei(msg, latitudine, longitudine, language):
         a = a + 1
         
         try:
-            markers = markers + "&markers=color:red%7Clabel:" + str(a) + "%7C" + str(i["Lat"]) + "," + str(
-                i["Long"])
-            dictforfile[i['Call']] = i
+            markers = markers + "&markers=color:red%7Clabel:" + str(a) + "%7C" + str(i["Lat"]) + "," + str(i["Long"])
+            dict_from_file[i['Call']] = i
             
             elenco_aerei.append(i['Call'])
             logging.info('elenco aerei :' + str(elenco_aerei))
@@ -125,16 +128,16 @@ def elencoaerei(msg, latitudine, longitudine, language):
         
         tastiera.append([KeyboardButton(text=str(b) + ' >' + aereo + '<')])
         
-    mapurl = "https://maps.googleapis.com/maps/api/staticmap?center=" + str(latitudine) + "," + str(
-        longitudine) + "&zoom=9&size=800x800&maptype=roadmap&" + markers + "&key=**********************************"
+    map_url = "https://maps.googleapis.com/maps/api/staticmap?center=" + str(latitudine) + "," + str(longitudine) + \
+              "&zoom=9&size=800x800&maptype=roadmap&" + markers + "&key=" + MAPS_KEY
     # logger.debug("Mappa : " + mapurl)
-    r = requests.get(mapurl)
+    r = requests.get(map_url)
     mappa = Image.open(BytesIO(r.content))
     mappa.save(str(chat_id) + ".png")
-    # for k in dictforfile:
+    # for k in dict_from_file:
     # logging.info('test dizionario : ' + k)
-    pickle.dump(dictforfile, filedaleggere)
-    # filedaleggere.close
+    pickle.dump(dict_from_file, file_da_leggere)
+    # file_da_leggere.close
     # logger.debug("Tastiera " + str(tastiera))
     bot.sendPhoto(chat_id, open(str(chat_id) + ".png", "rb"))
     bot.sendMessage(
@@ -144,23 +147,23 @@ def elencoaerei(msg, latitudine, longitudine, language):
     )
 
 
-def infovolo(msg, language):
+def info_volo(msg, language):
     chat_id = msg["chat"]["id"]
     txt = msg['text']
     volo = txt[3:-1]
-    filedaleggere = open(str(chat_id), 'rb')
-    dictfromfile = pickle.load(filedaleggere)
+    file_da_leggere = open(str(chat_id), 'rb')
+    dict_from_file = pickle.load(file_da_leggere)
     try:
-        altezza = round((dictfromfile[volo]['GAlt']) * 0.3048)
-        velocita = round((dictfromfile[volo]['Spd']) * 1.852)
-        prua = str(dictfromfile[volo]['Trak'])
-        if 'From' in dictfromfile[volo]:
+        altezza = round((dict_from_file[volo]['GAlt']) * 0.3048)
+        velocita = round((dict_from_file[volo]['Spd']) * 1.852)
+        prua = str(dict_from_file[volo]['Trak'])
+        if 'From' in dict_from_file[volo]:
             bot.sendMessage(
                 chat_id,
-                traduci('Il volo ', language) + dictfromfile[volo]['Call'] +
+                traduci('Il volo ', language) + dict_from_file[volo]['Call'] +
                 traduci(' della compagnia ', language) + ' ' +
-                dictfromfile[volo]['Op'] + traduci(' partito da ', language) +
-                dictfromfile[volo]['From'] + traduci(' è diretto a ', language) + dictfromfile[volo]['To'] +
+                dict_from_file[volo]['Op'] + traduci(' partito da ', language) +
+                dict_from_file[volo]['From'] + traduci(' è diretto a ', language) + dict_from_file[volo]['To'] +
                 traduci('. Si trova ad un altezza di ', language) + str(altezza) +
                 traduci(' metri e vola ad una velocità di ', language) +
                 str(velocita) + traduci(' Kmh. La sua rotta è ', language) + prua
@@ -168,24 +171,24 @@ def infovolo(msg, language):
         else:
             bot.sendMessage(
                 chat_id,
-                traduci('Il volo ', language) + dictfromfile[volo]['Call'] +
-                traduci(' della compagnia ', language) + dictfromfile[volo]['Op'] +
+                traduci('Il volo ', language) + dict_from_file[volo]['Call'] +
+                traduci(' della compagnia ', language) + dict_from_file[volo]['Op'] +
                 traduci(' si trova ad un altezza di ', language) + str(altezza) +
                 traduci(' metri e vola ad una velocità di ', language) + str(velocita) +
                 traduci(' Kmh. La sua rotta è ', language) + prua
             )
-        velocitacambio = round((dictfromfile[volo]['Vsi']) * 1.852)
-        if velocitacambio > 1:
+        velocita_cambio = round((dict_from_file[volo]['Vsi']) * 1.852)
+        if velocita_cambio > 1:
             bot.sendMessage(
                 chat_id,
                 traduci('In questo momento sta salendo di quota ad una velocità di ', language) +
-                str(velocitacambio) + ' Kmh'
+                str(velocita_cambio) + ' Kmh'
             )
-            # elif velocitacambio < 0:
+            # elif velocita_cambio < 0:
             #     bot.sendMessage(
             #         chat_id,
             #         'In questo momento sta effettuando una discesa ad una velocità di ' +
-            #         str(velocitacambio) + ' Kmh' + str(dictfromfile[infovolo]['Vsi'])
+            #         str(velocita_cambio) + ' Kmh' + str(dict_from_file[infovolo]['Vsi'])
             #     )
     except KeyError as e:
         logging.info('I got a KeyError - reason "%s"' % str(e))
@@ -195,9 +198,7 @@ def infovolo(msg, language):
         )
 
 
-TOKEN = '*******************************'
-
-bot = telepot.Bot(TOKEN)
+bot = telepot.Bot(TELEGRAM_TOKEN)
 bot.message_loop(on_chat_message)
 
 logging.info('Listening ...')
