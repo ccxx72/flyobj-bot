@@ -39,6 +39,7 @@ def info_volo(chat_id, txt, language, bot):
 				traduci(' metri e vola ad una velocità di ', language) +
 				str(velocita) + traduci(' Kmh. La sua rotta è ', language) + prua
 			)
+
 		else:
 			bot.sendMessage(
 				chat_id,
@@ -48,6 +49,7 @@ def info_volo(chat_id, txt, language, bot):
 				traduci(' metri e vola ad una velocità di ', language) + str(velocita) +
 				traduci(' Kmh. La sua rotta è ', language) + prua
 			)
+
 		velocita_cambio = round((dict_from_file[volo]['Vsi']) * 1.852)
 		if velocita_cambio > 1:
 			bot.sendMessage(

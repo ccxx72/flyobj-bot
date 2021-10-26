@@ -307,3 +307,7 @@ $RECYCLE.BIN/
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,pycharm+all,windows,linux
 
 myvenv
+pickle/
+maps/
+*.sqlite3
+*.sqlite3*

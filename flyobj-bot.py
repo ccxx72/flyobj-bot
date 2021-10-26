@@ -24,6 +24,7 @@ def on_chat_message(msg):
 
     if content_type == 'text':
         txt = msg['text']
+
         if txt[2] + txt[-1:] == '><':
             info_volo(chat_id, txt, language, bot)
 
@@ -42,6 +43,7 @@ def on_chat_message(msg):
                     ]
                 )
             )
+
         elif txt == '/help':
             bot.sendMessage(
                 chat_id,
@@ -51,6 +53,7 @@ def on_chat_message(msg):
                     language
                 )
             )
+
         else:
             bot.sendMessage(
                 chat_id,
@@ -60,6 +63,7 @@ def on_chat_message(msg):
                     language
                 )
             )
+
     elif content_type == "location":
         try:
             latitudine = msg["location"]["latitude"]
@@ -69,6 +73,7 @@ def on_chat_message(msg):
         except KeyError as e:
             logging.info('I got a KeyError - reason "%s"' % str(e))
             bot.sendMessage(chat_id, traduci("C'è qualche problema con le tue coordinate", language))
+
     elif content_type == "sticker":
         bot.sendMessage(chat_id, traduci('The answer is 42', language))
 
