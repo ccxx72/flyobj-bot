@@ -1,0 +1,12 @@
+{
+    "connections": {
+        "default": "sqlite://flyobj_bot.sqlite3"
+    },
+    "apps": {
+        "flyobj-bot": {
+            "models": ["models.api_counter"],
+            "default_connection": "default"
+        }
+    },
+    "use_tz": false
+}
