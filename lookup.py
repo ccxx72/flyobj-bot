@@ -1,6 +1,7 @@
 import csv
 import logging
 import os
+from typing import Optional, Tuple
 
 import requests
 
@@ -8,8 +9,9 @@ DATA_DIR = "data"
 AIRLINES_URL = "https://raw.githubusercontent.com/jpatokal/openflights/master/data/airlines.dat"
 AIRPORTS_URL = "https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat"
 
-_airlines: dict = {}  # ICAO prefix (3 lettere) -> nome compagnia
-_airports: dict = {}  # codice ICAO aeroporto -> città
+_airlines: dict = {}        # ICAO prefix (3 lettere) -> nome compagnia
+_airports: dict = {}        # codice ICAO aeroporto -> città
+_airport_coords: dict = {}  # codice ICAO aeroporto -> (lat, lon)
 
 
 def _download(url: str, path: str):
@@ -40,8 +42,14 @@ def _load_airports():
         for row in csv.reader(f):
             # formato: ID, Name, City, Country, IATA, ICAO, Lat, Lon, ...
             if len(row) >= 6 and row[5] not in (r'\N', ''):
+                icao = row[5].upper()
                 city = row[2] if row[2] else row[1]
-                _airports[row[5].upper()] = city
+                _airports[icao] = city
+                if len(row) >= 8:
+                    try:
+                        _airport_coords[icao] = (float(row[6]), float(row[7]))
+                    except ValueError:
+                        pass
 
 
 def get_airline_name(callsign: str) -> str:
@@ -56,6 +64,13 @@ def get_airport_city(icao_code: str) -> str:
     if not icao_code:
         return ''
     return _airports.get(icao_code.upper(), icao_code)
+
+
+def get_airport_coords(icao_code: str) -> Optional[Tuple[float, float]]:
+    """Restituisce (lat, lon) dell'aeroporto dato il codice ICAO, o None se non trovato."""
+    if not icao_code:
+        return None
+    return _airport_coords.get(icao_code.upper())
 
 
 os.makedirs(DATA_DIR, exist_ok=True)

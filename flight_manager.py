@@ -1,18 +1,20 @@
+import glob
 import logging
+import math
+import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from PIL import Image
 
 import pickle
 from config import BASE_URL_OPENSKY, BASE_URL_MAPS, MAPS_KEY
-from db_manager import DbManager
-from lookup import get_airline_name, get_airport_city
-
-db = DbManager()
+from db_manager import db
+from lookup import get_airline_name, get_airport_city, get_airport_coords
 
 # Indice → nome per i campi StateVector (da documentazione ufficiale)
 # [0]icao24 [1]callsign [2]country [3]time_pos [4]last_contact
@@ -22,6 +24,20 @@ db = DbManager()
 
 POSITION_SOURCES = {0: 'ADS-B', 1: 'ASTERIX', 2: 'MLAT', 3: 'FLARM'}
 
+# Rate limiting: OpenSky free tier richiede almeno 10s tra chiamate a /states/all
+_opensky_lock = threading.Lock()
+_last_opensky_call: float = 0.0
+_OPENSKY_COOLDOWN = 10.0
+
+
+def _throttle_opensky():
+    """Blocca il thread corrente fino a quando non sono trascorsi 10s dall'ultima chiamata."""
+    with _opensky_lock:
+        wait = _OPENSKY_COOLDOWN - (time.time() - _last_opensky_call)
+        if wait > 0:
+            time.sleep(wait)
+        globals()['_last_opensky_call'] = time.time()
+
 
 def _field(state, idx, default=None):
     try:
@@ -29,6 +45,48 @@ def _field(state, idx, default=None):
         return v if v is not None else default
     except IndexError:
         return default
+
+
+def _encode_polyline(points: list) -> str:
+    """Codifica una lista di (lat, lon) con l'algoritmo Encoded Polyline di Google."""
+    result = []
+    prev_lat_e5 = prev_lon_e5 = 0
+    for lat, lon in points:
+        lat_e5 = round(lat * 1e5)
+        lon_e5 = round(lon * 1e5)
+        for delta in (lat_e5 - prev_lat_e5, lon_e5 - prev_lon_e5):
+            v = delta << 1
+            if delta < 0:
+                v = ~v
+            while v >= 0x20:
+                result.append(chr((0x20 | (v & 0x1f)) + 63))
+                v >>= 5
+            result.append(chr(v + 63))
+        prev_lat_e5, prev_lon_e5 = lat_e5, lon_e5
+    return ''.join(result)
+
+
+def _fit_bounds(points: List[Tuple[float, float]]) -> Tuple[float, float, int]:
+    """Restituisce (center_lat, center_lon, zoom) che contiene tutti i punti in 800×800 px."""
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    center_lat = (min(lats) + max(lats)) / 2
+    center_lon = (min(lons) + max(lons)) / 2
+    span = max(max(lats) - min(lats), max(lons) - min(lons))
+    # 800 px a zoom Z copre ~1125/2^Z gradi; vogliamo span * 1.4 < copertura
+    zoom = max(2, min(10, int(math.log2(750 / max(span, 0.1)))))
+    return center_lat, center_lon, zoom
+
+
+def _cleanup_old_pickles(max_age_hours: float = 2.0):
+    """Elimina i file pickle più vecchi di max_age_hours."""
+    cutoff = time.time() - max_age_hours * 3600
+    for path in glob.glob('pickle/*.pickle'):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
 
 
 def _get_route_info(icao24: str) -> dict:
@@ -71,7 +129,6 @@ def _get_route_info(icao24: str) -> dict:
 
 
 def _get_aircraft_info(icao24: str) -> dict:
-    """Recupera modello e costruttore dalla banca dati OpenSky."""
     if not icao24:
         return {}
     try:
@@ -81,23 +138,28 @@ def _get_aircraft_info(icao24: str) -> dict:
         )
         if r.status_code == 200:
             d = r.json()
-            model = d.get('model', '').strip()
-            manufacturer = d.get('manufacturername', '').strip()
-            registration = d.get('registration', '').strip()
-            typecode = d.get('typecode', '').strip()
             return {
-                'model': model,
-                'manufacturer': manufacturer,
-                'registration': registration,
-                'typecode': typecode,
+                'model':        d.get('model', '').strip(),
+                'manufacturer': d.get('manufacturername', '').strip(),
+                'registration': d.get('registration', '').strip(),
+                'typecode':     d.get('typecode', '').strip(),
             }
     except Exception as e:
         logging.warning(f"Errore metadata aeromobile {icao24}: {e}")
     return {}
 
 
-def _generate_track_map(icao24: str, lat: float, lon: float, chat_id) -> Optional[str]:
-    """Genera una mappa con la traccia del volo sovrapposta."""
+def _generate_track_map(
+    icao24: str, lat: float, lon: float, chat_id,
+    dep_icao: str = '', arr_icao: str = ''
+) -> Optional[str]:
+    """Genera una mappa che mostra:
+    - linea grigia: aeroporto di partenza → inizio traccia ADS-B (stima)
+    - linea blu:    traccia ADS-B reale
+    - marker verde D: aeroporto di partenza
+    - marker rosso A: posizione attuale
+    - marker blu  B: aeroporto di arrivo stimato
+    """
     if not icao24:
         return None
     try:
@@ -109,28 +171,46 @@ def _generate_track_map(icao24: str, lat: float, lon: float, chat_id) -> Optiona
         if r.status_code != 200:
             return None
         track_data = r.json()
-        path = [wp for wp in (track_data.get('path') or [])
-                if wp[1] is not None and wp[2] is not None]
-        if len(path) < 2:
+        raw_path = [wp for wp in (track_data.get('path') or [])
+                    if wp[1] is not None and wp[2] is not None]
+        if len(raw_path) < 2:
             return None
 
-        # Campiona max 15 punti per rispettare il limite di lunghezza URL
-        step = max(1, len(path) // 15)
-        waypoints = path[::step]
-        if path[-1] not in waypoints:
-            waypoints.append(path[-1])
+        actual_wps: List[Tuple[float, float]] = [(wp[1], wp[2]) for wp in raw_path]
+        dep_coords = get_airport_coords(dep_icao)
+        arr_coords = get_airport_coords(arr_icao)
 
-        # Costruisce il parametro path per Google Static Maps
-        path_param = 'color:0x0055FFFF%7Cweight:3'
-        for wp in waypoints:
-            path_param += f'%7C{wp[1]},{wp[2]}'
+        # Punti usati per calcolare centro e zoom della mappa
+        bound_points = list(actual_wps)
+        if dep_coords:
+            bound_points.append(dep_coords)
+        if arr_coords:
+            bound_points.append(arr_coords)
+        center_lat, center_lon, zoom = _fit_bounds(bound_points)
 
-        map_url = (
-            f"{BASE_URL_MAPS}?center={lat},{lon}&zoom=7&size=800x800"
-            f"&maptype=roadmap&path={path_param}"
-            f"&markers=color:red%7Clabel:A%7C{lat},{lon}&key={MAPS_KEY}"
-        )
-        r2 = requests.get(map_url, timeout=15)
+        path_params = []
+        if dep_coords:
+            # Segmento stimato: aeroporto di partenza → primo punto traccia
+            encoded_est = _encode_polyline([dep_coords, actual_wps[0]])
+            path_params.append(('path', f"color:0x888888CC|weight:2|enc:{encoded_est}"))
+
+        # Traccia ADS-B reale
+        path_params.append(('path', f"color:0x0055FFFF|weight:3|enc:{_encode_polyline(actual_wps)}"))
+
+        marker_params = [('markers', f"color:red|label:A|{lat},{lon}")]
+        if dep_coords:
+            marker_params.append(('markers', f"color:green|label:D|{dep_coords[0]},{dep_coords[1]}"))
+        if arr_coords:
+            marker_params.append(('markers', f"color:blue|label:B|{arr_coords[0]},{arr_coords[1]}"))
+
+        params = [
+            ('center', f"{center_lat},{center_lon}"),
+            ('zoom', str(zoom)),
+            ('size', '800x800'),
+            ('maptype', 'roadmap'),
+        ] + path_params + marker_params + [('key', MAPS_KEY)]
+
+        r2 = requests.get(BASE_URL_MAPS, params=params, timeout=15)
         r2.raise_for_status()
         image_path = f"maps/{chat_id}_track.png"
         Image.open(BytesIO(r2.content)).save(image_path)
@@ -141,7 +221,7 @@ def _generate_track_map(icao24: str, lat: float, lon: float, chat_id) -> Optiona
 
 
 def get_flight_info(user_dict: Dict, txt: str) -> Optional[Dict]:
-    volo = txt[3:-1]
+    volo = txt[txt.index('>') + 1:-1]
     try:
         with open(f"pickle/{user_dict['chat_id']}.pickle", "rb") as f:
             dict_from_file = pickle.load(f)
@@ -154,26 +234,25 @@ def get_flight_info(user_dict: Dict, txt: str) -> Optional[Dict]:
         icao24 = raw.get('Icao24', '')
         airline = get_airline_name(raw['Call']) or raw.get('Op', '')
 
-        # Chiamate API in parallelo per ridurre i tempi di attesa
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            f_route    = executor.submit(_get_route_info, icao24)
+        # Route info prima: i codici ICAO di partenza/arrivo servono alla mappa della traccia
+        route = _get_route_info(icao24)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
             f_aircraft = executor.submit(_get_aircraft_info, icao24)
             f_track    = executor.submit(
-                _generate_track_map, icao24, raw['Lat'], raw['Long'], user_dict['chat_id']
+                _generate_track_map, icao24, raw['Lat'], raw['Long'], user_dict['chat_id'],
+                route['from_icao'], route['to_icao']
             )
-            route         = f_route.result()
             aircraft_info = f_aircraft.result()
             track_image   = f_track.result()
 
-        print(f"\n--- DATI per '{volo}' ---")
-        print(f"  Compagnia   : {airline}")
-        print(f"  Aeromobile  : {aircraft_info.get('manufacturer')} {aircraft_info.get('model')} ({aircraft_info.get('typecode')})")
-        print(f"  Reg.        : {aircraft_info.get('registration')}")
-        print(f"  Da          : {route['from']} ({route['from_icao']})")
-        print(f"  A           : {route['to']} ({route['to_icao']})")
-        print(f"  Rotta certa : {route['route_certain']}")
-        print(f"  Track image : {track_image}")
-        print("------------------------\n")
+        logging.debug(
+            "Dati volo '%s': compagnia=%s aeromobile=%s %s reg=%s da=%s a=%s rotta_certa=%s track=%s",
+            volo, airline,
+            aircraft_info.get('manufacturer'), aircraft_info.get('model'),
+            aircraft_info.get('registration'),
+            route['from'], route['to'], route['route_certain'], track_image
+        )
 
         return {
             'call': raw['Call'],
@@ -200,10 +279,11 @@ def get_flight_info(user_dict: Dict, txt: str) -> Optional[Dict]:
 
 
 def elenco_aerei(user_dict: Dict, latitudine, longitudine) -> Optional[Dict]:
-
     if not db.has_quota_available():
         logging.warning("Quota API mensile OpenSky esaurita")
         return None
+
+    _throttle_opensky()
 
     delta = 1.0
     params = {
@@ -222,9 +302,10 @@ def elenco_aerei(user_dict: Dict, latitudine, longitudine) -> Optional[Dict]:
         return None
 
     db.increase_counter()
+    _cleanup_old_pickles()
 
     flights = []
-    markers = ""
+    marker_params = []
     dict_from_file = {}
     a = 0
 
@@ -262,7 +343,7 @@ def elenco_aerei(user_dict: Dict, latitudine, longitudine) -> Optional[Dict]:
                 'PositionSource': POSITION_SOURCES.get(src_int, 'N/D'),
             }
 
-            markers += f"&markers=color:red%7Clabel:{a}%7C{lat},{lon}"
+            marker_params.append(('markers', f"color:red|label:{a}|{lat},{lon}"))
             dict_from_file[callsign] = aircraft
             flights.append(callsign)
         except (KeyError, TypeError) as e:
@@ -273,12 +354,15 @@ def elenco_aerei(user_dict: Dict, latitudine, longitudine) -> Optional[Dict]:
 
     image_name = None
     if flights:
-        map_url = (
-            f"{BASE_URL_MAPS}?center={latitudine},{longitudine}"
-            f"&zoom=9&size=800x800&maptype=roadmap&{markers}&key={MAPS_KEY}"
-        )
+        map_params = [
+            ('center', f"{latitudine},{longitudine}"),
+            ('zoom', '9'),
+            ('size', '800x800'),
+            ('maptype', 'roadmap'),
+            ('key', MAPS_KEY),
+        ] + marker_params
         try:
-            r = requests.get(map_url, timeout=15)
+            r = requests.get(BASE_URL_MAPS, params=map_params, timeout=15)
             r.raise_for_status()
             image_name = f"maps/{user_dict['chat_id']}.png"
             Image.open(BytesIO(r.content)).save(image_name)

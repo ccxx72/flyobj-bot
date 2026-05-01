@@ -7,8 +7,10 @@ import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import TELEGRAM_TOKEN
+from db_manager import db
 from flight_manager import elenco_aerei, get_flight_info
-from utils import translate, get_user_info, flight_message
+from translations import translate
+from utils import get_user_info, flight_message
 
 os.makedirs('pickle', exist_ok=True)
 os.makedirs('maps', exist_ok=True)
@@ -19,11 +21,6 @@ logging.basicConfig(handlers=[handler], level=logging.INFO)
 logging.info('Started')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-# stato conversazionale per utente
-_waiting_address: set = set()
-_last_coords: dict = {}       # {chat_id: (lat, lon)}
-_pending_track: dict = {}     # {chat_id: track_image_path}
 
 
 def _send_flights(chat_id, user_dict, latitudine, longitudine):
@@ -37,8 +34,7 @@ def _send_flights(chat_id, user_dict, latitudine, longitudine):
         ))
         return
 
-    # salva le ultime coordinate per il refresh
-    _last_coords[chat_id] = (latitudine, longitudine)
+    db.save_coords(chat_id, latitudine, longitudine)
 
     lang = user_dict['language']
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -73,16 +69,19 @@ def handle_text(message):
 
     logging.info(f"USER: {user_dict['name']} {user_dict['last_name']}")
 
-    lang = user_dict['language']  # usato in tutti i rami sotto
+    lang = user_dict['language']
 
-    # pulsante "Aggiorna lista": riutilizza le ultime coordinate salvate
-    if txt == translate('Aggiorna lista', lang) and chat_id in _last_coords:
-        lat, lon = _last_coords[chat_id]
-        _send_flights(chat_id, user_dict, lat, lon)
+    if txt == translate('Aggiorna lista', lang):
+        coords = db.get_coords(chat_id)
+        if coords:
+            _send_flights(chat_id, user_dict, coords[0], coords[1])
+        else:
+            bot.send_message(chat_id, translate(
+                'Condividi prima la tua posizione per aggiornare la lista dei voli.', lang
+            ))
         return
 
-    # risposta a un bottone volo (es. "1 >AZA123<")
-    if len(txt) > 3 and txt[2] == '>' and txt[-1] == '<':
+    if '>' in txt and txt.endswith('<') and txt.split(' ')[0].isdigit():
         flight_dict = get_flight_info(user_dict, txt)
 
         if not flight_dict:
@@ -94,13 +93,11 @@ def handle_text(message):
         fm = flight_message(lang)
         lines = []
 
-        # --- riga 1: identificativo + compagnia ---
         header = f"{fm['volo']} {flight_dict['call']}"
         if flight_dict['op']:
             header += f"  |  {flight_dict['op']}"
         lines.append(header)
 
-        # --- riga 2: aeromobile ---
         if flight_dict['model']:
             model_line = f"{fm['aeromobile']}: {flight_dict['model']}"
             if flight_dict['typecode']:
@@ -109,7 +106,6 @@ def handle_text(message):
                 model_line += f"  |  {fm['registrazione']}: {flight_dict['registration']}"
             lines.append(model_line)
 
-        # --- riga 3: rotta ---
         if flight_dict['from'] or flight_dict['to']:
             dep = f"{flight_dict['from']} ({flight_dict['from_icao']})" if flight_dict['from_icao'] else flight_dict['from'] or '?'
             arr = f"{flight_dict['to']} ({flight_dict['to_icao']})" if flight_dict['to_icao'] else flight_dict['to'] or '?'
@@ -118,27 +114,23 @@ def handle_text(message):
                 route_line += f"  {fm['rotta_stimata']}"
             lines.append(route_line)
 
-        # --- riga 4: quota ---
         alt_line = f"{fm['quota_geo']}: {flight_dict['hight_geo']} m"
         if flight_dict['hight_baro'] != flight_dict['hight_geo']:
             alt_line += f"  |  {fm['quota_baro']}: {flight_dict['hight_baro']} m"
         lines.append(alt_line)
 
-        # --- riga 5: velocità e rotta ---
         lines.append(f"{fm['velocita']}: {flight_dict['speed']} km/h  |  {fm['rotta']}: {flight_dict['trak']}°")
 
         bot.send_message(chat_id, "\n".join(lines))
 
-        # --- variazione quota ---
         vc = flight_dict['velocita_cambio']
         if vc > 1:
             bot.send_message(chat_id, f"{fm['in_salita']} {vc} km/h.")
         elif vc < -1:
             bot.send_message(chat_id, f"{fm['in_discesa']} {abs(vc)} km/h.")
 
-        # --- proponi la mappa traccia (solo se disponibile) ---
         if flight_dict.get('track_image'):
-            _pending_track[chat_id] = flight_dict['track_image']
+            db.set_pending_track(chat_id, flight_dict['track_image'])
             markup_inline = InlineKeyboardMarkup()
             markup_inline.row(
                 InlineKeyboardButton(translate('Sì, mostrami la rotta', lang), callback_data='show_track'),
@@ -146,14 +138,13 @@ def handle_text(message):
             )
             bot.send_message(
                 chat_id,
-                translate('Vuoi vedere la rotta seguita dall\'aereo?', lang),
+                translate("Vuoi vedere la rotta seguita dall'aereo?", lang),
                 reply_markup=markup_inline
             )
         return
 
-    # geocoding: l'utente ha premuto "Share your address" e ora invia il testo
-    if chat_id in _waiting_address:
-        _waiting_address.discard(chat_id)
+    if db.is_waiting_address(chat_id):
+        db.set_waiting_address(chat_id, False)
         bot.send_chat_action(chat_id, 'typing')
         try:
             r = requests.get(
@@ -169,7 +160,7 @@ def handle_text(message):
                 _send_flights(chat_id, user_dict, lat, lon)
             else:
                 bot.send_message(chat_id, translate(
-                    "Indirizzo non trovato, prova a essere più preciso.", lang
+                    'Indirizzo non trovato, prova a essere più preciso.', lang
                 ))
         except Exception as e:
             logging.error(f"Errore geocoding: {e}")
@@ -190,9 +181,8 @@ def handle_text(message):
         )
         return
 
-    # pulsante "Share your address": mette l'utente in attesa di un indirizzo
     if txt == translate('Share your address', lang) or txt == 'Share your address':
-        _waiting_address.add(chat_id)
+        db.set_waiting_address(chat_id, True)
         bot.send_message(chat_id, translate('Scrivi il nome di una città o un indirizzo.', lang))
         return
 
@@ -232,12 +222,13 @@ def handle_track_callback(call):
     chat_id = call.message.chat.id
     bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
     if call.data == 'show_track':
-        path = _pending_track.pop(chat_id, None)
+        path = db.get_pending_track(chat_id)
+        db.set_pending_track(chat_id, None)
         if path:
             with open(path, 'rb') as img:
                 bot.send_photo(chat_id, img)
     else:
-        _pending_track.pop(chat_id, None)
+        db.set_pending_track(chat_id, None)
         bot.send_message(chat_id, 'Ok')
     bot.answer_callback_query(call.id)
 
