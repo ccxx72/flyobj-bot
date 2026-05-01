@@ -15,9 +15,12 @@ from utils import get_user_info, flight_message
 os.makedirs('pickle', exist_ok=True)
 os.makedirs('maps', exist_ok=True)
 
-handler = RotatingFileHandler('myapp.log', maxBytes=1_000_000, backupCount=3)
+_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'myapp.log')
+handler = RotatingFileHandler(_log_path, maxBytes=1_000_000, backupCount=3)
 handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
-logging.basicConfig(handlers=[handler], level=logging.INFO)
+_logger = logging.getLogger()
+_logger.setLevel(logging.INFO)
+_logger.addHandler(handler)
 logging.info('Started')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
