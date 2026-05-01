@@ -1,44 +1,44 @@
+import sqlite3
 from datetime import datetime
 
-from syncasync import AsyncToSync
-from tortoise import Tortoise
-from tortoise.exceptions import DoesNotExist
+DB_PATH = "flyobj_bot.sqlite3"
 
-from models.api_counter import ApiCounter
+
+def _get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_counter (
+            month TEXT PRIMARY KEY,
+            count INTEGER DEFAULT 0,
+            limit_val INTEGER DEFAULT 350
+        )
+    """)
+    conn.commit()
+    return conn
 
 
 class DbManager:
-    def __init__(self):
-        self.create_tortoise_instance()
+    def has_quota_available(self) -> bool:
+        month = self._current_month()
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT count, limit_val FROM api_counter WHERE month = ?", (month,)
+            ).fetchone()
+            if row is None:
+                conn.execute("INSERT INTO api_counter (month) VALUES (?)", (month,))
+                conn.commit()
+                return True
+            return row[0] < row[1]
 
-    @AsyncToSync
-    async def create_tortoise_instance(self):
-        await Tortoise.init(config_file="tortoise.json")
-        await Tortoise.generate_schemas(safe=True)
+    def increase_counter(self):
+        month = self._current_month()
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE api_counter SET count = count + 1 WHERE month = ?", (month,)
+            )
+            conn.commit()
 
-    @AsyncToSync
-    async def has_quota_reached(self):
+    @staticmethod
+    def _current_month() -> str:
         now = datetime.now()
-        month = f"{now.month}-{now.year}"
-        try:
-            row = await ApiCounter.get(month=month)
-            return row.count < (row.limit - 1)
-        except DoesNotExist:
-            await ApiCounter.create(month=month)
-            return False
-
-    @AsyncToSync
-    async def increase_counter(self):
-        now = datetime.now()
-        month = f"{now.month}-{now.year}"
-        try:
-            row = await ApiCounter.get(month=month)
-            new_count = row.count + 1
-
-            if new_count < row.limit:
-                await ApiCounter.filter(month=month).update(count=new_count)
-                return new_count
-            else:
-                return row.count
-        except DoesNotExist:
-            return -1
+        return f"{now.month}-{now.year}"

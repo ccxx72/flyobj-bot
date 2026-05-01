@@ -309,5 +309,6 @@ $RECYCLE.BIN/
 myvenv
 pickle/
 maps/
+data/
 *.sqlite3
 *.sqlite3*

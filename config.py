@@ -1,5 +1,10 @@
-TELEGRAM_TOKEN = '***write here your token***'
-MAPS_KEY = '***write here your key***'
+import os
+from dotenv import load_dotenv
 
-BASE_URL_RADAR = 'https://radar.freedar.uk/VirtualRadar/AircraftList.json'
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+MAPS_KEY = os.getenv('MAPS_KEY')
+
+BASE_URL_OPENSKY = 'https://opensky-network.org/api/states/all'
 BASE_URL_MAPS = 'https://maps.googleapis.com/maps/api/staticmap'
